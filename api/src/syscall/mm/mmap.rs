@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs_ng::FileBackend;
 use axhal::paging::{MappingFlags, PageSize};
-use axmm::backend::{Backend, SharedPages};
+use axmm::backend::{Backend, BackendOps, SharedPages, ThpPolicy};
 use axtask::current;
 use linux_raw_sys::general::*;
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
@@ -319,6 +319,23 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
     debug!("sys_madvise <= addr: {addr:#x}, length: {length:x}, advice: {advice:#x}");
+    if addr % PageSize::Size4K as usize != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    let vaddr = VirtAddr::from(addr);
+
+    let curr = current();
+
+    let aspace = curr.as_thread().proc_data.aspace.lock();
+    let area = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?;
+    
+    match advice as u32 {
+        MADV_HUGEPAGE  => area.backend().modify_thp_policy(ThpPolicy::Always),
+        MADV_NOHUGEPAGE => area.backend().modify_thp_policy(ThpPolicy::Never),
+        _ => return Err(AxError::InvalidInput),
+    }
+
     Ok(0)
 }
 

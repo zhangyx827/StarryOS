@@ -17,7 +17,7 @@ use axhal::{
     mem::virt_to_phys,
     paging::{MappingFlags, PageSize},
 };
-use axmm::{AddrSpace, backend::Backend};
+use axmm::{AddrSpace, backend::Backend, backend::ThpPolicy};
 use axsync::Mutex;
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
@@ -122,6 +122,7 @@ fn map_elf<'a>(
             ph.offset,
             Some(ph.offset + ph.file_size),
         );
+        // the defulat policy is set to inherit
         uspace.map(
             seg_start.align_down_4k(),
             seg_align_size,

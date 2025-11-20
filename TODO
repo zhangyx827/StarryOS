@@ -1,0 +1,147 @@
+
+  ## 1. The three “policy layers”
+
+  Think of three layers that control whether THP is allowed for a region:
+
+  1. Global THP mode (system default), from something like /sys/kernel/mm/transparent_hugepage/enabled:
+      - Values: always, madvise, never.
+      - This is the default rule for anonymous mappings.
+  2. Per‑mapping THP policy (what you called ThpPolicy):
+      - Stored with each mapping/VMA: Inherit, Always, Never, (optionally WithinSize, Advise).
+      - Inherit means: “use whatever the global mode says for this mapping”.
+  3. Hints like madvise:
+      - MADV_HUGEPAGE: per‑region request “please use THP here if possible”.
+      - MADV_NOHUGEPAGE: per‑region “don’t use THP here, ever”.
+
+  The kernel always decides THP eligibility for a region from some combination of these three.
+
+  ———
+
+  ## 2. Global THP modes and their intent
+
+  Global mode is interpreted roughly as:
+
+  - always:
+      - THP is permitted by default for anonymous mappings, as long as they’re technically eligible (aligned, big enough, etc.).
+      - MADV_HUGEPAGE is not required; it’s just a strong per‑mapping “yes” hint.
+  - madvise:
+      - THP is not allowed by default.
+      - Only regions with an explicit per‑mapping “yes” (set by madvise(MADV_HUGEPAGE)) can get THP.
+  - never:
+      - THP is disabled globally for anonymous mappings, regardless of madvise hints.
+
+  This is all about the default; per‑mapping overrides can tighten or relax it (except global never, which usually overrides
+  everything).
+
+  ———
+
+  ## 3. Per‑mapping ThpPolicy and how it’s set
+
+  When you create a mapping (ELF segment, mmap, stack, heap), you assign it an initial per‑mapping policy. Conceptually:
+
+  - For normal anonymous/private mappings:
+      - Start with ThpPolicy::Inherit, meaning “no explicit override; use global”.
+  - For special regions you never want THP on (e.g. some stacks, kernel‑specific areas), you might use ThpPolicy::Never.
+  - For some rare cases you always want THP, regardless of global, you might use ThpPolicy::Always.
+
+  Later, when madvise runs on a range:
+
+  - MADV_HUGEPAGE conceptually turns that mapping’s policy into “THP is allowed here”:
+      - Either by changing ThpPolicy to Always, or
+      - by some “Advise + user_advised” flag that effectively acts like Always for that region.
+  - MADV_NOHUGEPAGE marks that mapping as “never THP”:
+      - Conceptually ThpPolicy::Never, regardless of global mode.
+
+  So per‑mapping policy says: “For this VMA or range, is THP permitted or forbidden, or do I defer to the global default?”
+
+  ———
+
+  ## 4. Effective decision: combining global + mapping policy
+
+  When the THP code (fault‑time or khugepaged) looks at a particular region, it needs a yes/no answer:
+
+  > “Is THP allowed here at all?”
+
+  It conceptually does:
+
+  - Look at the mapping’s ThpPolicy:
+      - Never → THP forbidden, regardless of global.
+      - Always → THP allowed, regardless of global.
+      - Inherit → depends entirely on global mode.
+  - For Inherit:
+      - If global = always → treat as “allowed”.
+      - If global = madvise → treat as “not allowed” unless there is an additional hint (e.g. madvise upgraded the mapping).
+      - If global = never → treat as “not allowed” everywhere.
+
+  And of course, even when “allowed”, you still have to pass the technical checks: alignment, mapping size, same permissions,
+  etc.
+
+  ———
+
+  ## 5. madvise’s specific role
+
+  madvise(MADV_HUGEPAGE) doesn’t allocate a huge page itself. It:
+
+  - Sets or changes the mapping’s policy so that future THP logic sees this region as eligible in more cases.
+  - In enabled = madvise global mode, it’s the only way to get THP for that area, because:
+      - “No per‑VMA override” → mapping stays with Inherit, which resolves to “no THP” under madvise.
+      - After MADV_HUGEPAGE, that region’s policy is effectively “yes, THP here”, so THP is now allowed even though global
+        doesn’t enable it for other regions.
+
+  madvise(MADV_NOHUGEPAGE) does the opposite: it sets the mapping policy to “no THP here, even if global says always or
+  MADV_HUGEPAGE was called before.”
+
+  ———
+
+  ## 6. Fault‑time vs. background THP
+
+  There are two places where the policy is used:
+
+  1. Fault‑time THP (in the page fault path):
+    - When a fault occurs in an unmapped piece of an anonymous region:
+        - Check ThpPolicy + global mode: is THP allowed here?
+        - Check alignment and size: is there enough room for a 2 MiB chunk aligned to 2 MiB?
+        - If both yes:
+            - Allocate and map a 2 MiB page (instead of a 4 KiB page).
+        - Otherwise:
+            - Allocate normal 4 KiB pages.
+
+In global always mode, lots of faults in large mappings may choose 2 MiB pages; in madvise mode, only regions with
+MADV_HUGEPAGE get that behavior.
+
+  2. Background collapse (khugepaged):
+      - A kernel thread periodically scans mappings:
+          - For each mapping, asks: “Is THP allowed here?” (using mapping policy + global).
+          - If yes, looks for 2 MiB‑aligned windows where:
+              - All 4 KiB pages are present,
+              - Permissions and other constraints are compatible.
+          - When it finds such a window, it collapses those 512 base pages into one 2 MiB page.
+      - Regions with ThpPolicy::Never or with Inherit under global madvise (and no MADV_HUGEPAGE) are simply skipped.
+
+  Both fault‑time and background paths use the same policy decision; they just trigger at different times.
+
+  ———
+
+  ## 7. Per‑size knobs
+
+  Finally, the per‑size sysfs knobs (hugepages-2048kB/enabled, etc.) add another dimension:
+
+  - For each THP size (you’ll start with 2 MiB only):
+      - There is a per‑size mode: always, madvise, never, within_size etc.
+  - Conceptually, for a given size:
+      - If per‑size mode says never, then policy says “even if mapping/global say yes, you don’t use this size”.
+      - If per‑size mode says always or madvise, you treat it like the global mode but restricted to that size.
+
+  In a first pass you can ignore multi‑size and just say:
+
+  - “Our THP size is 2 MiB; its per‑size mode and the global anon mode are effectively the same knob.”
+
+  ———
+
+  Putting it all together:
+
+  - Global THP mode sets the default: where Inherit means “THP allowed everywhere” (always), or “THP only when mapping
+    explicitly opted in” (madvise), or “never”.
+  - Per‑mapping ThpPolicy lets you override that default on individual mappings (via madvise or internal rules).
+  - THP logic (fault‑time + khugepaged) always asks: “Given this mapping’s policy and the global mode, is THP allowed here?”
+    before it ever considers a 2 MiB allocation or collapse.
