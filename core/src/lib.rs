@@ -18,3 +18,7 @@ pub mod shm;
 pub mod task;
 pub mod time;
 pub mod vfs;
+/// khuge
+pub mod khuge;
+
+pub use khuge::spawn_khugepaged;

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs_ng::FileBackend;
 use axhal::paging::{MappingFlags, PageSize};
-use axmm::backend::{Backend, BackendOps, SharedPages, ThpPolicy};
+use axmm::backend::{Backend, BackendOps, SharedPages, VmaFlags};
 use axtask::current;
 use linux_raw_sys::general::*;
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
@@ -319,24 +319,40 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
     debug!("sys_madvise <= addr: {addr:#x}, length: {length:x}, advice: {advice:#x}");
-    if addr % PageSize::Size4K as usize != 0 {
-        return Err(AxError::InvalidInput);
+    // Linux 语义里 length 可以不是页对齐；length==0 通常是 no-op。
+    if length == 0 {
+        return Ok(0);
     }
+
+    let end = addr
+        .checked_add(length)
+        .ok_or(AxError::InvalidInput)?;
 
     let vaddr = VirtAddr::from(addr);
 
     let curr = current();
-
     let aspace = curr.as_thread().proc_data.aspace.lock();
     let area = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?;
-    
-    match advice as u32 {
-        MADV_HUGEPAGE  => area.backend().modify_thp_policy(ThpPolicy::Always),
-        MADV_NOHUGEPAGE => area.backend().modify_thp_policy(ThpPolicy::Never),
-        _ => return Err(AxError::InvalidInput),
+
+    if end > area.end().as_usize() {
+        return Err(AxError::InvalidInput);
     }
 
-    Ok(0)
+    match advice as u32 {
+        MADV_HUGEPAGE => {
+            // Per‑mapping “允许 THP”：设置 HUGEPAGE，清除 NOHUGEPAGE。
+            area.backend().set_vma_flag(VmaFlags::HUGEPAGE);
+            area.backend().clear_vma_flag(VmaFlags::NOHUGEPAGE);
+            Ok(0)
+        }
+        MADV_NOHUGEPAGE => {
+            // Per‑mapping “禁止 THP”：设置 NOHUGEPAGE，清除 HUGEPAGE。
+            area.backend().set_vma_flag(VmaFlags::NOHUGEPAGE);
+            area.backend().clear_vma_flag(VmaFlags::HUGEPAGE);
+            Ok(0)
+        }
+        _ => Err(AxError::InvalidInput),
+    }
 }
 
 pub fn sys_msync(addr: usize, length: usize, flags: u32) -> AxResult<isize> {
