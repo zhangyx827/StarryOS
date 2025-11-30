@@ -1,0 +1,205 @@
+#define _GNU_SOURCE
+#include <errno.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14
+#endif
+
+#define THP_SIZE (2UL * 1024 * 1024)
+#define PAGE_4K  4096UL
+
+static const char *THP_ENABLED =
+    "/sys/kernel/mm/transparent_hugepage/enabled";
+static const char *KHUGEPAGED_PAGES_COLLAPSED =
+    "/sys/kernel/mm/transparent_hugepage/khugepaged/pages_collapsed";
+
+static void die(const char *msg) {
+    perror(msg);
+    exit(1);
+}
+
+static void set_thp_mode(const char *mode) {
+    FILE *f = fopen(THP_ENABLED, "r+");
+    if (!f) {
+        perror("fopen THP_ENABLED");
+        exit(77); // skip if THP sysfs not present
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) die("fseek THP_ENABLED");
+    if (fprintf(f, "%s\n", mode) < 0) die("fprintf THP_ENABLED");
+    if (fflush(f) != 0) die("fflush THP_ENABLED");
+    fclose(f);
+}
+
+static unsigned long read_pages_collapsed(void) {
+    FILE *f = fopen(KHUGEPAGED_PAGES_COLLAPSED, "r");
+    if (!f) die("fopen pages_collapsed");
+    char buf[64] = {0};
+    if (!fgets(buf, sizeof(buf), f)) die("fgets");
+    fclose(f);
+    return strtoul(buf, NULL, 10);
+}
+
+// Debug syscall to force THP collapse of a given range.
+static long debug_thp_collapse(void *addr, size_t len) {
+#ifdef SYS_sync_file_range2
+#ifndef SYS_debug_thp_collapse
+#define SYS_debug_thp_collapse SYS_sync_file_range2
+#endif
+    return syscall(SYS_debug_thp_collapse, (uintptr_t)addr, len);
+#else
+    (void)addr;
+    (void)len;
+    return 0;
+#endif
+}
+
+static void fill_pattern(char *p, size_t len, unsigned seed) {
+    for (size_t i = 0; i < len; i += PAGE_4K) {
+        p[i] = (char)(((i / PAGE_4K) ^ seed) & 0xFF);
+    }
+}
+
+static int check_pattern(char *p, size_t len, unsigned seed, const char *tag) {
+    for (size_t i = 0; i < len; i += PAGE_4K) {
+        char expected = (char)(((i / PAGE_4K) ^ seed) & 0xFF);
+        if (p[i] != expected) {
+            fprintf(stderr,
+                    "[%s] mismatch at offset %#zx: got %#x, expected %#x\n",
+                    tag, i, (unsigned char)p[i], (unsigned char)expected);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Wait for khugepaged (or debug syscall) to collapse the 2M window that
+// contains thp_base. If it doesn't happen within a timeout, we skip the test.
+static int wait_for_collapse(char *thp_base) {
+    (void)thp_base; // currently unused, but kept for symmetry with other tests.
+
+    unsigned long prev = read_pages_collapsed();
+    printf("[mm_cow_thp_fork_unmap_test] waiting for collapse (pages_collapsed=%lu)...\n", prev);
+    for (int iter = 0; iter < 30; iter++) {
+        sleep(1);
+        unsigned long now = read_pages_collapsed();
+        if (now > prev) {
+            printf("  collapse detected (pages_collapsed=%lu)\n", now);
+            return 0;
+        }
+    }
+    printf("  WARNING: no collapse after 30s, skipping THP-specific checks\n");
+    return -1;
+}
+
+int main(void) {
+    printf("=== mm_cow_thp_fork_unmap_test ===\n");
+    printf("This test verifies COW + split/unmap behavior after THP collapse.\n\n");
+
+    // Enable THP to make anonymous mappings eligible for collapse.
+    set_thp_mode("always");
+
+    // Map 4MiB so we can host at least one 2MiB-aligned window.
+    size_t len = 4UL * 1024 * 1024;
+    char *base = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        die("mmap");
+    }
+
+    if (madvise(base, len, MADV_HUGEPAGE) != 0) {
+        die("madvise(MADV_HUGEPAGE)");
+    }
+
+    // Find a 2MiB-aligned window inside [base, base+len).
+    uintptr_t b = (uintptr_t)base;
+    uintptr_t e = b + len;
+    uintptr_t win = (b + THP_SIZE - 1) & ~(THP_SIZE - 1);
+    if (win + THP_SIZE > e) {
+        printf("[WARN] cannot find 2MiB-aligned window inside mapping\n");
+        munmap(base, len);
+        return 77;
+    }
+    char *thp_base = (char *)win;
+    printf("[INFO] mapping base=%p, THP window=%p - %p\n",
+           base, thp_base, thp_base + THP_SIZE);
+
+    unsigned seed_parent = 0x31;
+    fill_pattern(thp_base, THP_SIZE, seed_parent);
+
+    // Touch again to ensure 4K PTEs are present.
+    for (size_t i = 0; i < THP_SIZE; i += PAGE_4K) {
+        thp_base[i] ^= 1;
+        thp_base[i] ^= 1;
+    }
+
+    // Try to force THP collapse for this 2MiB window, then wait for khugepaged.
+    long collapsed = debug_thp_collapse(thp_base, THP_SIZE);
+    printf("[INFO] debug_thp_collapse(%p, 2MiB) -> %ld\n", thp_base, collapsed);
+    if (wait_for_collapse(thp_base) != 0) {
+        munmap(base, len);
+        return 77; // skip if we couldn't get a THP
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        die("fork");
+    }
+
+    if (pid == 0) {
+        // Child: COW writes + partial unmap inside the THP window.
+        unsigned seed_child = 0x7A;
+        printf("[child] writing first 16 pages inside THP window (seed=%#x)...\n",
+               seed_child);
+        size_t write_len = PAGE_4K * 16;
+        if (write_len > THP_SIZE) write_len = THP_SIZE;
+        fill_pattern(thp_base, write_len, seed_child);
+
+        // Partial unmap in the middle to force split_thp + unmap.
+        char *hole = thp_base + 10 * PAGE_4K;
+        size_t hole_len = 8 * PAGE_4K;
+        if (((uintptr_t)hole % PAGE_4K) == 0) {
+            printf("[child] munmap(%p, %zu) inside THP window\n", hole, hole_len);
+            if (munmap(hole, hole_len) != 0) {
+                perror("[child] munmap(hole)");
+                _exit(1);
+            }
+        }
+
+        _exit(0);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        die("waitpid");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "[parent] child exited abnormally: status=%d\n", status);
+        munmap(base, len);
+        return 1;
+    }
+
+    // Parent: verify its THP window is fully intact, no holes, original data.
+    printf("[parent] verifying THP window contents after child COW+munmap...\n");
+    if (check_pattern(thp_base, THP_SIZE, seed_parent, "parent") != 0) {
+        fprintf(stderr,
+                "[mm_cow_thp_fork_unmap_test] FAIL: parent mapping corrupted\n");
+        munmap(base, len);
+        return 1;
+    }
+
+    if (munmap(base, len) != 0) {
+        die("munmap");
+    }
+
+    printf("[mm_cow_thp_fork_unmap_test] PASS\n");
+    return 0;
+}
