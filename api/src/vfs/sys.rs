@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use axfs_ng_vfs::{Filesystem, VfsError};
-use axmm::backend::{current_ano_policy, modify_ano_policy};
+use axmm::backend::{current_thp_policy, set_thp_policy};
 use starry_core::vfs::{
     DirMaker, DirMapping, RwFile, SimpleDir, SimpleFile, SimpleFileOperation, SimpleFs,
 };
@@ -28,7 +28,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                         RwFile::new(move |req| match req {
                             SimpleFileOperation::Read => {
                                 // Read global THP mode and render it
-                                let s = current_ano_policy();
+                                let s = current_thp_policy();
                                 Ok(Some(s.into_bytes()))
                             }
                             SimpleFileOperation::Write(data) => {
@@ -36,7 +36,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                                 let s = core::str::from_utf8(data)
                                     .map_err(|_| VfsError::InvalidInput)?
                                     .trim();
-                                modify_ano_policy(s)?;
+                                set_thp_policy(s)?;
                                 Ok(None)
                             }
                         }),
