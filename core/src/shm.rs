@@ -3,6 +3,7 @@
 use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 
 use axerrno::{AxError, AxResult};
+use axfs_ng::CachedFile;
 use axhal::{paging::MappingFlags, time::monotonic_time_nanos};
 use axmm::backend::SharedPages;
 use axsync::Mutex;
@@ -85,7 +86,7 @@ pub struct ShmInner {
     pub page_num: usize,
     va_range: BTreeMap<Pid, VirtAddrRange>,
     /// physical pages
-    pub phys_pages: Option<Arc<SharedPages>>,
+    pub backing: Option<Arc<CachedFile>>,
     /// whether remove on last detach, see shm_ctl
     pub rmid: bool,
     /// Mapping flags used for this shared memory segment.

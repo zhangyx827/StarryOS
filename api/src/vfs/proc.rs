@@ -394,7 +394,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
 
         sys.add("kernel", {
             let mut kernel = DirMapping::new();
-            
+
             kernel.add(
                 "pid_max",
                 SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),

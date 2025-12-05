@@ -17,7 +17,7 @@ use axhal::{
     mem::virt_to_phys,
     paging::{MappingFlags, PageSize},
 };
-use axmm::{AddrSpace, backend::Backend};
+use axmm::{AddrSpace, backend::{Backend, VmaFlags}};
 use axsync::Mutex;
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
@@ -121,6 +121,7 @@ fn map_elf<'a>(
             FileBackend::Cached(cache.clone()),
             ph.offset,
             Some(ph.offset + ph.file_size),
+            VmaFlags::empty(),
         );
         // the defulat policy is set to inherit
         uspace.map(
@@ -325,7 +326,7 @@ pub fn load_user_app(
         ustack_size,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
         false,
-        Backend::new_alloc(ustack_start, PageSize::Size4K),
+        Backend::new_alloc(ustack_start, PageSize::Size4K, VmaFlags::VM_STACK),
     )?;
 
     let stack_data = app_stack_region(args, envs, &auxv, ustack_top.into());
@@ -345,7 +346,7 @@ pub fn load_user_app(
         heap_size,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
         true,
-        Backend::new_alloc(heap_start, PageSize::Size4K),
+        Backend::new_alloc(heap_start, PageSize::Size4K, VmaFlags::empty()),
     )?;
 
     Ok((entry, user_sp))

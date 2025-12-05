@@ -1,2 +1,9 @@
 break __axplat_main
-watch *0xffffffc0805907aa
+break __axplat_main
+break mm.rs:216
+break core/src/mm.rs:215
+break __axplat_main
+break mm.rs:216
+break core/src/mm.rs:215
+break *0xffffffc0804d147a
+break arceos/modules/axfs-ng/src/highlevel/file.rs:561

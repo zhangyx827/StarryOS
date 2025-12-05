@@ -8,8 +8,7 @@ use axtask::current;
 use linux_raw_sys::general::*;
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use starry_core::{
-    task::AsThread,
-    vfs::{Device, DeviceMmap},
+    task::AsThread, vfs::{Device, DeviceMmap}
 };
 use starry_vm::{vm_load, vm_write_slice};
 
@@ -113,6 +112,7 @@ pub fn sys_mmap(
             MmapFlags::from_bits_truncate(flags)
         }
     };
+    let mut vm_flags = VmaFlags::empty();
     let map_type = map_flags & MmapFlags::TYPE;
     if !matches!(
         map_type,
@@ -137,8 +137,10 @@ pub fn sys_mmap(
     );
 
     let page_size = if map_flags.contains(MmapFlags::HUGE_1GB) {
+        vm_flags |= VmaFlags::VM_HUGETLB;
         PageSize::Size1G
     } else if map_flags.contains(MmapFlags::HUGE) {
+        vm_flags |= VmaFlags::VM_HUGETLB;
         PageSize::Size2M
     } else {
         PageSize::Size4K
@@ -205,7 +207,7 @@ pub fn sys_mmap(
                                 return Err(AxError::NoSuchDevice);
                             }
                             DeviceMmap::ReadOnly => {
-                                Backend::new_cow(start, page_size, backend, offset as u64, None)
+                                Backend::new_cow(start, page_size, backend, offset as u64, None, VmaFlags::empty())
                             }
                             DeviceMmap::Physical(mut range) => {
                                 range.start += offset;
@@ -235,9 +237,9 @@ pub fn sys_mmap(
             if let Some(file) = file {
                 // Private mapping from a file
                 let backend = file.inner().backend()?.clone();
-                Backend::new_cow(start, page_size, backend, offset as u64, None)
+                Backend::new_cow(start, page_size, backend, offset as u64, None, vm_flags)
             } else {
-                Backend::new_alloc(start, page_size)
+                Backend::new_alloc(start, page_size, vm_flags)
             }
         }
         _ => return Err(AxError::InvalidInput),
@@ -245,7 +247,7 @@ pub fn sys_mmap(
 
     let populate = map_flags.contains(MmapFlags::POPULATE);
     aspace.map(start, length, permission_flags.into(), populate, backend)?;
-
+    
     Ok(start.as_usize() as _)
 }
 
@@ -319,40 +321,65 @@ pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> 
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
     debug!("sys_madvise <= addr: {addr:#x}, length: {length:x}, advice: {advice:#x}");
-    // Linux 语义里 length 可以不是页对齐；length==0 通常是 no-op。
+    if !addr.is_aligned_4k() {
+        return Err(AxError::InvalidInput);
+    }
+
     if length == 0 {
         return Ok(0);
     }
 
-    let end = addr
-        .checked_add(length)
-        .ok_or(AxError::InvalidInput)?;
-
-    let vaddr = VirtAddr::from(addr);
-
+    let length = align_up_4k(length);
     let curr = current();
-    let aspace = curr.as_thread().proc_data.aspace.lock();
-    let area = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?;
-
-    if end > area.end().as_usize() {
-        return Err(AxError::InvalidInput);
+    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+    let start_addr = VirtAddr::from(addr);
+    if start_addr + length > aspace.end() {
+        // The range specified exceeds the process address space
+        return Err(AxError::NoMemory);
     }
 
     match advice as u32 {
-        MADV_HUGEPAGE => {
-            // Per‑mapping “允许 THP”：设置 HUGEPAGE，清除 NOHUGEPAGE。
-            area.backend().set_vma_flag(VmaFlags::HUGEPAGE);
-            area.backend().clear_vma_flag(VmaFlags::NOHUGEPAGE);
-            Ok(0)
+        MADV_HUGEPAGE | MADV_NOHUGEPAGE => {
+            // The advices need to split 
+            // the vma when necessary
+            // (TODO) other advises 
+            aspace.split(start_addr, length)?;
+
+            let end = start_addr
+                .checked_add(length)
+                .ok_or(AxError::InvalidInput)?;
+            let mut vaddr = start_addr;
+
+            while vaddr < end {
+                let area = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?;
+                // If addresses in the specified range are not currently mapped
+                // return ENOMEM
+                let area_end = area.end().min(end);
+                match advice as u32 {
+                    MADV_HUGEPAGE => { 
+                        area.backend().set_vma_flag(VmaFlags::VM_HUGEPAGE);
+                        area.backend().clear_vma_flag(VmaFlags::VM_NOHUGEPAGE);
+                    },
+                    MADV_NOHUGEPAGE => {
+                        area.backend().set_vma_flag(VmaFlags::VM_NOHUGEPAGE);
+                        area.backend().clear_vma_flag(VmaFlags::VM_HUGEPAGE);
+                    }
+                    _ => {
+                        warn!("unsupported adivse {advice}");
+                    },
+                }
+                vaddr = area_end;
+            }
+        },
+        MADV_COLLAPSE => {
+            aspace.collapase_page_range(start_addr, length)?;
         }
-        MADV_NOHUGEPAGE => {
-            // Per‑mapping “禁止 THP”：设置 NOHUGEPAGE，清除 HUGEPAGE。
-            area.backend().set_vma_flag(VmaFlags::NOHUGEPAGE);
-            area.backend().clear_vma_flag(VmaFlags::HUGEPAGE);
-            Ok(0)
+        _ => {
+            warn!("Called sys_madvise for unsupported adivse {advice}");
+            return Err(AxError::InvalidInput);
         }
-        _ => Err(AxError::InvalidInput),
     }
+    Ok(0)
 }
 
 pub fn sys_msync(addr: usize, length: usize, flags: u32) -> AxResult<isize> {

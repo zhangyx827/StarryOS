@@ -10,13 +10,14 @@ use axsync::Mutex;
 use axtask::current;
 use linux_raw_sys::general::*;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
+use spin::Once;
 use starry_core::{
     shm::{SHM_MANAGER, ShmInner, ShmidDs},
     task::AsThread,
 };
 
 use super::next_ipc_id;
-use crate::mm::{UserPtr, nullable};
+use crate::{mm::{UserPtr, nullable}, vfs::MemoryFs};
 
 bitflags::bitflags! {
     /// flags for sys_shmat
@@ -39,6 +40,12 @@ const IPC_RMID: u32 = 0;
 const IPC_SET: u32 = 1;
 
 const IPC_STAT: u32 = 2;
+
+static SHM_FS: Once<Arc<MemoryFs>> = Once::new();
+
+fn shm_fs() -> &'static Arc<MemoryFs> {
+    SHM_FS.call_once(|| Arc::new(MemoryFs::new()))
+}
 
 pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
     let page_num = memory_addr::align_up_4k(size) / PAGE_SIZE_4K;
@@ -107,6 +114,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     let mut aspace = proc_data.aspace.lock();
 
     let start_aligned = memory_addr::align_down_4k(addr);
+    // TODO: page size
     let length = shm_inner.page_num * PAGE_SIZE_4K;
 
     // alloc the virtual address range
@@ -141,7 +149,7 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     );
 
     // map the virtual address range to the physical address
-    if let Some(phys_pages) = shm_inner.phys_pages.clone() {
+    if let Some(backing) = shm_inner.backing.clone() {
         // Another proccess has attached the shared memory
         // TODO(mivik): shm page size
         let backend = Backend::new_shared(start_addr, phys_pages);

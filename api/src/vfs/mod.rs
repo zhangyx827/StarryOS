@@ -2,14 +2,12 @@
 
 pub mod dev;
 mod proc;
-mod tmp;
 mod sys;
+mod tmp;
 
 use axerrno::LinuxResult;
 use axfs_ng::{FS_CONTEXT, FsContext};
-use axfs_ng_vfs::{
-    Filesystem, NodePermission,
-};
+use axfs_ng_vfs::{Filesystem, NodePermission};
 pub use starry_core::vfs::{Device, DeviceOps, DirMapping, SimpleFs};
 pub use tmp::MemoryFs;
 
@@ -32,18 +30,6 @@ pub fn mount_all() -> LinuxResult<()> {
     mount_at(&fs, "/tmp", tmp::MemoryFs::new())?;
     mount_at(&fs, "/proc", proc::new_procfs())?;
     mount_at(&fs, "/sys", sys::new_sysfs())?;
-    // mount_at(&fs, "/sys", sys::new_sysfs())?;
-    // let mut path = PathBuf::new();
-    // for comp in Path::new("/sys/class/graphics/fb0/device").components() {
-    //     path.push(comp.as_str());
-    //     if fs.resolve(&path).is_err() {
-    //         fs.create_dir(&path, DIR_PERMISSION)?;
-    //     }
-    // }
-
-
-    // path.push("subsystem");
-    // fs.symlink("whatever", &path)?;
     drop(fs);
 
     #[cfg(feature = "dev-log")]

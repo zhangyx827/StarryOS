@@ -201,6 +201,7 @@ fn khuge_entry() {
                     &mut page_scanned,
                     max_ptes_none(),
                     pages_to_scan(),
+                    max_ptes_shared(),
                     &mut pages_collapsed,
                 ) {
                     axmm::ScanResult::ScanFinished | axmm::ScanResult::ScanMmExit => {

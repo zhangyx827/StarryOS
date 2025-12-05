@@ -82,6 +82,7 @@ starry-api = { path = "./api" }
 [patch.crates-io]
 page_table_entry = { path = "../page_table_multiarch1/page_table_entry" }
 page_table_multiarch = { path = "../page_table_multiarch1/page_table_multiarch" }
+memory_addr = { path = "../axmm_crates/memory_addr" }
 
 [patch."https://github.com/arceos-org/axplat_crates.git"]
 axplat = { path = "../axplat_crates/axplat" }

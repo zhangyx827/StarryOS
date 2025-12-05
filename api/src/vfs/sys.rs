@@ -1,7 +1,9 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use axfs_ng_vfs::{Filesystem, VfsError};
-use axmm::backend::{current_thp_policy, set_thp_policy};
+use axmm::backend::{
+    current_shmem_thp_policy, current_thp_policy, set_shmem_thp_policy, set_thp_policy,
+};
 use starry_core::vfs::{
     DirMaker, DirMapping, RwFile, SimpleDir, SimpleFile, SimpleFileOperation, SimpleFs,
 };
@@ -29,7 +31,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                             SimpleFileOperation::Read => {
                                 // Read global THP mode and render it
                                 let s = current_thp_policy();
-                                Ok(Some(s.into_bytes()))
+                                Ok(Some(alloc::format!("{}\n", s).into_bytes()))
                             }
                             SimpleFileOperation::Write(data) => {
                                 // Parse user input and update global THP mode
@@ -42,7 +44,28 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                         }),
                     ),
                 );
-
+                
+                thp.add(
+                    "shmem_enabled",
+                    SimpleFile::new_regular(
+                        fs.clone(),
+                        RwFile::new(move |req| match req {
+                            SimpleFileOperation::Read => {
+                                // Read shmem/tmpfs THP mode and render it
+                                let s = current_shmem_thp_policy();
+                                Ok(Some(alloc::format!("{}\n", s).into_bytes()))
+                            }
+                            SimpleFileOperation::Write(data) => {
+                                // Parse user input and update shmem/tmpfs THP mode
+                                let s = core::str::from_utf8(data)
+                                    .map_err(|_| VfsError::InvalidInput)?
+                                    .trim();
+                                set_shmem_thp_policy(s)?;
+                                Ok(None)
+                            }
+                        }),
+                    ),
+                );
                 thp.add("khugepaged", {
                     let mut khugepaged = DirMapping::new();
 
