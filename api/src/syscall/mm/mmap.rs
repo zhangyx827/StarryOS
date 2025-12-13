@@ -1,18 +1,30 @@
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
+use core::sync::atomic::AtomicU64;
 
 use axerrno::{AxError, AxResult};
-use axfs_ng::FileBackend;
+use axfs_ng::{CachedFile, FileBackend};
 use axhal::paging::{MappingFlags, PageSize};
-use axmm::backend::{Backend, BackendOps, SharedPages, VmaFlags};
+use axmm::backend::{Backend, BackendOps, VmaFlags};
 use axtask::current;
 use linux_raw_sys::general::*;
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use starry_core::{
-    task::AsThread, vfs::{Device, DeviceMmap}
+    task::AsThread,
+    vfs::{Device, DeviceMmap},
 };
 use starry_vm::{vm_load, vm_write_slice};
 
-use crate::file::{File, FileLike};
+use crate::{
+    file::{File, FileLike},
+    syscall::ipc::create_shm_file,
+};
+
+static ANON_SHM_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_anon_shm_name() -> String {
+    let n = ANON_SHM_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    alloc::format!("anonshm_{}", n)
+}
 
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
@@ -206,9 +218,14 @@ pub fn sys_mmap(
                             DeviceMmap::None => {
                                 return Err(AxError::NoSuchDevice);
                             }
-                            DeviceMmap::ReadOnly => {
-                                Backend::new_cow(start, page_size, backend, offset as u64, None, VmaFlags::empty())
-                            }
+                            DeviceMmap::ReadOnly => Backend::new_cow(
+                                start,
+                                page_size,
+                                backend,
+                                offset as u64,
+                                None,
+                                VmaFlags::empty(),
+                            ),
                             DeviceMmap::Physical(mut range) => {
                                 range.start += offset;
                                 if range.is_empty() {
@@ -230,7 +247,10 @@ pub fn sys_mmap(
                     }
                 }
             } else {
-                Backend::new_shared(start, Arc::new(SharedPages::new(length, PageSize::Size4K)?))
+                let shm_name = next_anon_shm_name();
+                let loc = create_shm_file(&shm_name, length as u64);
+                let cache = Arc::new(CachedFile::get_or_create(loc));
+                Backend::new_shared(start, cache.clone(), &curr.as_thread().proc_data.aspace)
             }
         }
         MmapFlags::PRIVATE => {
@@ -247,7 +267,7 @@ pub fn sys_mmap(
 
     let populate = map_flags.contains(MmapFlags::POPULATE);
     aspace.map(start, length, permission_flags.into(), populate, backend)?;
-    
+
     Ok(start.as_usize() as _)
 }
 
@@ -340,9 +360,9 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
 
     match advice as u32 {
         MADV_HUGEPAGE | MADV_NOHUGEPAGE => {
-            // The advices need to split 
+            // The advices need to split
             // the vma when necessary
-            // (TODO) other advises 
+            // (TODO) other advises
             aspace.split(start_addr, length)?;
 
             let end = start_addr
@@ -356,23 +376,23 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
                 // return ENOMEM
                 let area_end = area.end().min(end);
                 match advice as u32 {
-                    MADV_HUGEPAGE => { 
+                    MADV_HUGEPAGE => {
                         area.backend().set_vma_flag(VmaFlags::VM_HUGEPAGE);
                         area.backend().clear_vma_flag(VmaFlags::VM_NOHUGEPAGE);
-                    },
+                    }
                     MADV_NOHUGEPAGE => {
                         area.backend().set_vma_flag(VmaFlags::VM_NOHUGEPAGE);
                         area.backend().clear_vma_flag(VmaFlags::VM_HUGEPAGE);
                     }
                     _ => {
                         warn!("unsupported adivse {advice}");
-                    },
+                    }
                 }
                 vaddr = area_end;
             }
-        },
+        }
         MADV_COLLAPSE => {
-            aspace.collapase_page_range(start_addr, length)?;
+            aspace.collapse_page_range(start_addr, length)?;
         }
         _ => {
             warn!("Called sys_madvise for unsupported adivse {advice}");

@@ -510,9 +510,11 @@ dependencies = [
  "lazy_static",
  "lazyinit",
  "log",
+ "lru",
  "memory_addr",
  "memory_set",
  "page_table_multiarch",
+ "spin 0.10.0",
 ]
 
 [[package]]

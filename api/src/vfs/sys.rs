@@ -44,7 +44,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                         }),
                     ),
                 );
-                
+
                 thp.add(
                     "shmem_enabled",
                     SimpleFile::new_regular(

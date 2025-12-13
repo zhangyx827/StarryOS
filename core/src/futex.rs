@@ -14,10 +14,8 @@ use core::{
 };
 
 use axerrno::AxResult;
-use axmm::{
-    AddrSpace,
-    backend::{Backend, SharedPages},
-};
+use axfs_ng::CachedFile;
+use axmm::{AddrSpace, backend::Backend};
 use axsync::Mutex;
 use axtask::{
     current,
@@ -118,7 +116,7 @@ pub enum FutexKey {
         /// The offset of the futex within the shared memory region.
         offset: usize,
         /// The shared memory region.
-        region: Result<Weak<SharedPages>, Weak<()>>,
+        region: Result<Weak<CachedFile>, Weak<()>>,
     },
 }
 
@@ -130,7 +128,7 @@ impl FutexKey {
                 Backend::Shared(backend) => {
                     return Self::Shared {
                         offset: address - area.start().as_usize(),
-                        region: Ok(Arc::downgrade(backend.pages())),
+                        region: Ok(Arc::downgrade(backend.cache())),
                     };
                 }
                 Backend::File(file) => {

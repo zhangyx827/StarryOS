@@ -5,7 +5,6 @@ use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use axerrno::{AxError, AxResult};
 use axfs_ng::CachedFile;
 use axhal::{paging::MappingFlags, time::monotonic_time_nanos};
-use axmm::backend::SharedPages;
 use axsync::Mutex;
 use linux_raw_sys::{
     ctypes::{c_long, c_ushort},
@@ -86,7 +85,7 @@ pub struct ShmInner {
     pub page_num: usize,
     va_range: BTreeMap<Pid, VirtAddrRange>,
     /// physical pages
-    pub backing: Option<Arc<CachedFile>>,
+    pub cache: Option<Arc<CachedFile>>,
     /// whether remove on last detach, see shm_ctl
     pub rmid: bool,
     /// Mapping flags used for this shared memory segment.
@@ -102,7 +101,7 @@ impl ShmInner {
             shmid,
             page_num: memory_addr::align_up_4k(size) / PAGE_SIZE_4K,
             va_range: BTreeMap::new(),
-            phys_pages: None,
+            cache: None,
             rmid: false,
             mapping_flags,
             shmid_ds: ShmidDs::new(
@@ -132,8 +131,8 @@ impl ShmInner {
     }
 
     /// Maps the given physical shared pages to this shared memory segment.
-    pub fn map_to_phys(&mut self, phys_pages: Arc<SharedPages>) {
-        self.phys_pages = Some(phys_pages);
+    pub fn map_to_phys(&mut self, cache: Arc<CachedFile>) {
+        self.cache = Some(cache);
     }
 
     /// Returns the number of processes currently attached to this shared memory

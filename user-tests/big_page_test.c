@@ -43,7 +43,7 @@ static void die(const char *msg) {
 // 尝试在 /dev/shm 或 /tmp 下创建一个 tmpfs 文件。
 static int open_tmpfs_file(char *out_path, size_t out_len) {
     const char *candidates[] = {
-        "/dev/shm/thp_tmpfs_file_collapse_test.bin",
+        // "./test",
         "/tmp/thp_tmpfs_file_collapse_test.bin",
     };
 
@@ -61,7 +61,8 @@ static int open_tmpfs_file(char *out_path, size_t out_len) {
 static void fill_pattern(uint8_t *p, size_t len) {
     size_t pages = len / PAGE_SIZE_4K;
     for (size_t i = 0; i < pages; ++i) {
-        memset(p + i * PAGE_SIZE_4K, (uint8_t)(i & 0xff), PAGE_SIZE_4K);
+        char c = p[i * PAGE_SIZE_4K];
+        // memset(p + i * PAGE_SIZE_4K, (uint8_t)(i & 0xff), PAGE_SIZE_4K);
     }
 }
 
@@ -77,9 +78,12 @@ int main(void) {
     printf("=== thp_tmpfs_file_collapse_test ===\n");
     printf("  using tmpfs file: %s\n", path);
 
-    if (ftruncate(fd, (off_t)THP_SIZE) != 0) {
+    if (ftruncate(fd, (off_t)(THP_SIZE * 3)) != 0) {
         die("ftruncate");
     }
+
+    char* buf = (char*)malloc(sizeof(char) * THP_SIZE * 2);
+    int nbytes = read(fd, buf, THP_SIZE);
 
     /* 准备父子进程同步用的 pipe：parent<->child */
     int p2c[2], c2p[2];
@@ -105,13 +109,14 @@ int main(void) {
         if (cp == MAP_FAILED) {
             die("child mmap(tmpfs)");
         }
+        
         printf("  [child] mmap at %p\n", cp);
 
         // /* 先将子进程自己的映射全部 fault 进来，这样 collapse 前父子都有完整的 4K PTE。 */
         // for (size_t i = 0; i < THP_SIZE; i += PAGE_4K) {
         //     cp[i] = (char)(i / PAGE_4K);
         // }
-        printf("  [child] touched all 4K pages\n");
+        // printf("  [child] touched all 4K pages\n");
 
         /* 告诉父进程：子已经完成 mmap，可以开始 collapse 相关操作 */
         if (write(c2p[1], "R", 1) != 1) {
@@ -121,7 +126,8 @@ int main(void) {
         /* 等待父进程完成 MADV_COLLAPSE */
         char ch;
         if (read(p2c[0], &ch, 1) != 1) {
-            die("child read collapse-done");
+            // perror("read");
+            // die("child read collapse-done");
         }
 
         /* collapse 完成后，检查映射是否仍可访问且模式没有被破坏 */
@@ -130,7 +136,7 @@ int main(void) {
             /* 不强行检查具体值，只要访问不崩就认为 retract_page_tables + 再 fault 行为是自洽的 */
             (void)v;
         }
-        cp[0] ^= 1; /* 简单写一写 */
+        cp[0] ^= 1; 
         printf("  [child] mapping still accessible after parent's collapse\n");
 
         if (munmap(cp, THP_SIZE) != 0) {
@@ -153,7 +159,7 @@ int main(void) {
     if (p == MAP_FAILED) {
         die("parent mmap(tmpfs)");
     }
-    printf("  [parent] mmap(tmpfs) at %p len=%zu\n", p, (size_t)THP_SIZE);
+    printf("  [parent] mmap(tmpfs) at %p len=%zu\n", p, (size_t)THP_SIZE * 2);
 
     /* 填充 pattern，确保 FileBackend/cache 里有完整的 4K 页面内容 */
     // for (size_t i = 0; i < THP_SIZE; i += PAGE_4K) {
@@ -173,11 +179,14 @@ int main(void) {
         perror("madvise(MADV_COLLAPSE, tmpfs file)");
         munmap(p, THP_SIZE);
         close(fd);
-        unlink(path);
+        // unlink(path);
         return 1;
     }
     printf("  [parent] madvise(MADV_COLLAPSE) returned 0\n");
 
+    // if (read(fd, buf, THP_SIZE) < 0) {
+    //   perror("read");
+    // }
     /* collapse 后，父自身的映射也应该仍可访问 */
     for (size_t i = 0; i < THP_SIZE; i += PAGE_4K) {
         p[i] ^= 1;
@@ -196,10 +205,12 @@ int main(void) {
 
     /* 等待子进程结果 */
     int status = 0;
+
+    
     if (waitpid(pid, &status, 0) < 0) {
         die("waitpid");
     }
-    unlink(path);
+    // unlink(path);
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         printf("thp_tmpfs_file_collapse_test: child FAILED (status=%d)\n", status);

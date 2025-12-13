@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/vfs.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -44,30 +45,42 @@ static void die(const char *msg) {
     exit(1);
 }
 
-/* 尝试在 /dev/shm 或 /tmp 下创建一个 tmpfs 文件 */
-static int open_tmpfs_file(char *out_path, size_t out_len) {
+/* Prefer a disk-backed directory; skip tmpfs/shmem (TMPFS_MAGIC). */
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0x01021994
+#endif
+static int open_disk_file(char *out_path, size_t out_len) {
     const char *candidates[] = {
-        "/dev/shm/file_madvise_collapse_faultin_test.bin",
+        "./file_madvise_collapse_faultin_test.bin",   // likely ext4 in guest rootfs
         "/tmp/file_madvise_collapse_faultin_test.bin",
+        "/var/tmp/file_madvise_collapse_faultin_test.bin",
     };
 
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         const char *p = candidates[i];
         int fd = open(p, O_CREAT | O_RDWR | O_TRUNC, 0600);
-        if (fd >= 0) {
-            snprintf(out_path, out_len, "%s", p);
-            return fd;
+        if (fd < 0) {
+            continue;
         }
+        struct statfs s;
+        if (statfs(p, &s) == 0 && s.f_type == TMPFS_MAGIC) {
+            // Not disk-backed; skip.
+            close(fd);
+            unlink(p);
+            continue;
+        }
+        snprintf(out_path, out_len, "%s", p);
+        return fd;
     }
-    return -1;
+    return -1; // not found
 }
 
 int main(void) {
     char path[128] = {0};
-    int fd = open_tmpfs_file(path, sizeof(path));
+    int fd = open_disk_file(path, sizeof(path));
     if (fd < 0) {
-        perror("open tmpfs file");
-        printf("file_madvise_collapse_faultin_test: SKIP (no /dev/shm or /tmp)\n");
+        perror("open disk-backed file");
+        printf("file_madvise_collapse_faultin_test: SKIP (no non-tmpfs dir available)\n");
         return 0;
     }
 
@@ -76,7 +89,7 @@ int main(void) {
     }
 
     printf("=== file_madvise_collapse_faultin_test ===\n");
-    printf("  using tmpfs file: %s (size=%lu)\n", path, (unsigned long)REGION_SIZE);
+    printf("  using disk-backed file: %s (size=%lu)\n", path, (unsigned long)REGION_SIZE);
 
     char *p = mmap(NULL, REGION_SIZE,
                    PROT_READ | PROT_WRITE,
@@ -105,17 +118,24 @@ int main(void) {
     }
     printf("  madvise(MADV_COLLAPSE) succeeded\n");
 
-    // 3) 校验前半部分保持原 pattern，后半部分为 0。
+    // 3) 校验前半部分保持原 pattern，并在后半部分写入新 pattern 触发 fault-in。
     int rc = 0;
-    for (size_t off = 0; off < REGION_SIZE; off += PAGE_4K) {
+    for (size_t off = 0; off < half; off += PAGE_4K) {
         char v = p[off];
-        char expected = (off < half) ? (char)(off / PAGE_4K) : 0;
+        char expected = (char)(off / PAGE_4K);
         if (v != expected) {
             fprintf(stderr,
-                    "  mismatch at offset %zu: got %#x expected %#x\n",
+                    "  mismatch (first half) at offset %zu: got %#x expected %#x\n",
                     off, (unsigned char)v, (unsigned char)expected);
             rc = 1;
             break;
+        }
+    }
+    if (rc == 0) {
+        memset(p + half, 0x5a, half); // force-fault the previously untouched half
+        if (msync(p, REGION_SIZE, MS_SYNC) != 0) {
+            perror("msync after tail write");
+            rc = 1;
         }
     }
 
@@ -123,6 +143,30 @@ int main(void) {
         die("munmap");
     }
     close(fd);
+
+    if (rc == 0) {
+        // 重新打开并校验全文件内容持久化：前半递增，后半 0x5a。
+        fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            die("reopen for verify");
+        }
+        char buf[PAGE_4K];
+        for (size_t off = 0; off < REGION_SIZE; off += PAGE_4K) {
+            ssize_t n = pread(fd, buf, sizeof(buf), (off_t)off);
+            if (n != (ssize_t)sizeof(buf)) {
+                die("pread verify");
+            }
+            unsigned char expected = (off < half) ? (unsigned char)(off / PAGE_4K) : 0x5a;
+            if (buf[0] != expected || buf[PAGE_4K - 1] != expected) {
+                fprintf(stderr,
+                        "  verify mismatch at offset %zu: got %#x/%#x expected %#x\n",
+                        off, buf[0], buf[PAGE_4K - 1], expected);
+                rc = 1;
+                break;
+            }
+        }
+        close(fd);
+    }
     unlink(path);
 
     if (rc == 0) {
@@ -132,4 +176,3 @@ int main(void) {
     }
     return rc;
 }
-

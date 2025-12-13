@@ -1,11 +1,10 @@
 use alloc::sync::Arc;
 
 use axerrno::{AxError, AxResult};
-use axhal::{
-    paging::{MappingFlags, PageSize},
-    time::monotonic_time_nanos,
-};
-use axmm::backend::{Backend, SharedPages};
+use axfs_ng::{CachedFile, FsContext, OpenOptions};
+use axfs_ng_vfs::{Filesystem, Mountpoint, path::Path};
+use axhal::{paging::MappingFlags, time::monotonic_time_nanos};
+use axmm::backend::Backend;
 use axsync::Mutex;
 use axtask::current;
 use linux_raw_sys::general::*;
@@ -17,7 +16,10 @@ use starry_core::{
 };
 
 use super::next_ipc_id;
-use crate::{mm::{UserPtr, nullable}, vfs::MemoryFs};
+use crate::{
+    mm::{UserPtr, nullable},
+    vfs::MemoryFs,
+};
 
 bitflags::bitflags! {
     /// flags for sys_shmat
@@ -41,10 +43,35 @@ const IPC_SET: u32 = 1;
 
 const IPC_STAT: u32 = 2;
 
-static SHM_FS: Once<Arc<MemoryFs>> = Once::new();
+static SHM_FS: Once<Filesystem> = Once::new();
 
-fn shm_fs() -> &'static Arc<MemoryFs> {
-    SHM_FS.call_once(|| Arc::new(MemoryFs::new()))
+pub fn shm_fs() -> &'static Filesystem {
+    SHM_FS.call_once(|| MemoryFs::new())
+}
+
+pub fn shm_fs_root_location() -> axfs_ng_vfs::Location {
+    let fs = shm_fs();
+    let mp = Mountpoint::new_root(fs);
+    mp.root_location()
+}
+
+pub fn create_shm_file(name: &str, size: u64) -> axfs_ng_vfs::Location {
+    let root = shm_fs_root_location();
+    let ctx = FsContext::new(root.clone());
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(true);
+
+    let loc = opts
+        .open(&ctx, Path::new(name))
+        .unwrap()
+        .into_file()
+        .unwrap()
+        .location()
+        .clone();
+
+    // Set length
+    loc.entry().as_file().unwrap().set_len(size).unwrap();
+    loc
 }
 
 pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
@@ -149,18 +176,20 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     );
 
     // map the virtual address range to the physical address
-    if let Some(backing) = shm_inner.backing.clone() {
+    if let Some(cache) = shm_inner.cache.clone() {
         // Another proccess has attached the shared memory
         // TODO(mivik): shm page size
-        let backend = Backend::new_shared(start_addr, phys_pages);
+        let backend = Backend::new_shared(start_addr, cache, &curr.as_thread().proc_data.aspace);
         aspace.map(start_addr, length, mapping_flags, false, backend)?;
     } else {
         // This is the first process to attach the shared memory
-        let pages = Arc::new(SharedPages::new(length, PageSize::Size4K)?);
-        let backend = Backend::new_shared(start_addr, pages.clone());
+        let shm_name = alloc::format!("sysvshm_{}", shmid);
+        let loc = create_shm_file(&shm_name, length as u64);
+        let cache = Arc::new(CachedFile::get_or_create(loc));
+        let backend = Backend::new_shared(start_addr, cache.clone(), &curr.as_thread().proc_data.aspace);
         aspace.map(start_addr, length, mapping_flags, false, backend)?;
 
-        shm_inner.map_to_phys(pages);
+        shm_inner.map_to_phys(cache);
     }
 
     shm_inner.attach_process(pid, va_range);

@@ -17,7 +17,10 @@ use axhal::{
     mem::virt_to_phys,
     paging::{MappingFlags, PageSize},
 };
-use axmm::{AddrSpace, backend::{Backend, VmaFlags}};
+use axmm::{
+    AddrSpace,
+    backend::{Backend, VmaFlags},
+};
 use axsync::Mutex;
 use extern_trait::extern_trait;
 use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
