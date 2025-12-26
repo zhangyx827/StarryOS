@@ -375,8 +375,20 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
                 // If addresses in the specified range are not currently mapped
                 // return ENOMEM
                 let area_end = area.end().min(end);
+
                 match advice as u32 {
                     MADV_HUGEPAGE => {
+                        if area.backend().contain_vma_flag(
+                            VmaFlags::VM_HUGETLB
+                                | VmaFlags::VM_IO
+                                | VmaFlags::VM_DONTEXPAND
+                                | VmaFlags::VM_MIXEDMAP
+                                | VmaFlags::VM_PFNMAP
+                                | VmaFlags::VM_NOHUGEPAGE
+                                | VmaFlags::VM_STACK,
+                        ) {
+                            return Err(AxError::InvalidInput);
+                        }
                         area.backend().set_vma_flag(VmaFlags::VM_HUGEPAGE);
                         area.backend().clear_vma_flag(VmaFlags::VM_NOHUGEPAGE);
                     }

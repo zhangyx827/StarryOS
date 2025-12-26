@@ -186,7 +186,11 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
         let shm_name = alloc::format!("sysvshm_{}", shmid);
         let loc = create_shm_file(&shm_name, length as u64);
         let cache = Arc::new(CachedFile::get_or_create(loc));
-        let backend = Backend::new_shared(start_addr, cache.clone(), &curr.as_thread().proc_data.aspace);
+        let backend = Backend::new_shared(
+            start_addr,
+            cache.clone(),
+            &curr.as_thread().proc_data.aspace,
+        );
         aspace.map(start_addr, length, mapping_flags, false, backend)?;
 
         shm_inner.map_to_phys(cache);

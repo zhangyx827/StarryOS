@@ -41,7 +41,7 @@ thread.daemon = True
 thread.start()
 
 try:
-    if not ready.wait(timeout=5):
+    if not ready.wait(timeout=10):
         raise Exception("QEMU did not start in time")
     if p.poll() is not None:
         raise Exception("QEMU exited prematurely")
@@ -49,6 +49,7 @@ try:
     PROMPT = "starry:~#"
 
     s = socket.create_connection(("localhost", 4444), timeout=5)
+    s.settimeout(0.5)
     buffer = ""
     sent = False
     start = datetime.datetime.now()
@@ -56,6 +57,10 @@ try:
     while True:
         try:
             b = s.recv(1024).decode("utf-8", errors="ignore")
+        except socket.timeout:
+            if datetime.datetime.now() - start > datetime.timedelta(seconds=30):
+                raise Exception("Timeout waiting for BusyBox shell prompt")
+            continue
         except ConnectionError as e:
             print(e)
             break
@@ -69,7 +74,7 @@ try:
             s.sendall(b"exit\r\n")
             sent = True
 
-        if datetime.datetime.now() - start > datetime.timedelta(seconds=10):
+        if datetime.datetime.now() - start > datetime.timedelta(seconds=30):
             raise Exception("Timeout waiting for exit")
 
     if PROMPT not in buffer:

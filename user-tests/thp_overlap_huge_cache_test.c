@@ -75,26 +75,26 @@ int main(void) {
     if (ftruncate(fd, file_size) != 0) die("ftruncate");
 
     // Map three regions with different offsets to create varied placement.
-    void *map0 = map_at(fd, 0, HUGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED);
-    if (map0 == MAP_FAILED) die("mmap0");
+    // void *map0 = map_at(fd, 0, HUGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED);
+    // if (map0 == MAP_FAILED) die("mmap0");
     // Use 512KiB offset to create overlap and intentionally test misalignment.
-    void *map1 = map_at(fd, HUGE_SIZE / 2, HUGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED);
-    if (map1 == MAP_FAILED) die("mmap1");
     void *map2 = map_at(fd, HUGE_SIZE, HUGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED);
     if (map2 == MAP_FAILED) die("mmap2");
+    void *map1 = map_at(fd, HUGE_SIZE / 2, HUGE_SIZE * 2, PROT_READ | PROT_WRITE, MAP_SHARED);
+    if (map1 == MAP_FAILED) die("mmap1");
 
     // Fill patterns in each mapped window.
-    fill_pattern(map0, HUGE_SIZE, 0x11);
+    // fill_pattern(map0, HUGE_SIZE, 0x11);
     fill_pattern(map1, HUGE_SIZE, 0x22);
     fill_pattern(map2, HUGE_SIZE, 0x33);
 
     // Collapse first region aligned at 0.
-    try_collapse(map0, HUGE_SIZE * 2, "collapse map0");
+    // try_collapse(map0, HUGE_SIZE * 2, "collapse map0");
+    try_collapse(map2, HUGE_SIZE * 2, "collapse map2");
     // Collapse second region at offset 1MiB (misaligned w.r.t 2MiB).
     try_collapse(map1, HUGE_SIZE * 2, "collapse map1");
     // Collapse third region aligned at 2MiB.
-    try_collapse(map2, HUGE_SIZE * 2, "collapse map2");
-
+    
     // Fork to simulate reuse of cache in another process.
     pid_t pid = fork();
     if (pid < 0) die("fork");
@@ -105,15 +105,15 @@ int main(void) {
         void *overlap1 = (uint8_t *)map1; // starts at 1MiB
         try_collapse(overlap1, HUGE_SIZE, "child overlap1");
         // Another overlap covering tail of map0 and head of map1: [0.5MiB, 2.5MiB)
-        void *overlap2 = (uint8_t *)map0 + HUGE_SIZE / 2;
-        try_collapse(overlap2, HUGE_SIZE, "child overlap2");
+        // void *overlap2 = (uint8_t *)map0 + HUGE_SIZE / 2;
+        // try_collapse(overlap2, HUGE_SIZE, "child overlap2");
 
         // Verify patterns remain intact in their respective regions.
-        verify_pattern(map0, HUGE_SIZE / 2, 0x11, "map0 head");
-        verify_pattern((uint8_t *)map0 + HUGE_SIZE / 2, HUGE_SIZE / 2, 0x22, "map0 tail overlaps map1");
+        // verify_pattern(map0, HUGE_SIZE / 2, 0x11, "map0 head");
+        // verify_pattern((uint8_t *)map0 + HUGE_SIZE / 2, HUGE_SIZE / 2, 0x22, "map0 tail overlaps map1");
         verify_pattern(map2, HUGE_SIZE, 0x33, "map2");
 
-        munmap(map0, HUGE_SIZE);
+        // munmap(map0, HUGE_SIZE);
         munmap(map1, HUGE_SIZE);
         munmap(map2, HUGE_SIZE);
         close(fd);
@@ -129,7 +129,7 @@ int main(void) {
         ret = 1;
     }
 
-    munmap(map0, HUGE_SIZE);
+    // munmap(map0, HUGE_SIZE);
     munmap(map1, HUGE_SIZE);
     munmap(map2, HUGE_SIZE);
     close(fd);

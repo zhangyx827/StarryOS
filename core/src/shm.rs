@@ -84,7 +84,6 @@ pub struct ShmInner {
     /// Number of pages in the shared memory segment.
     pub page_num: usize,
     va_range: BTreeMap<Pid, VirtAddrRange>,
-    /// physical pages
     pub cache: Option<Arc<CachedFile>>,
     /// whether remove on last detach, see shm_ctl
     pub rmid: bool,

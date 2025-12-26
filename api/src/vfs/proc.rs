@@ -225,13 +225,14 @@ impl SimpleDirOps for ThreadDir {
                         task.as_thread().oom_score_adj().to_string().into_bytes(),
                     )),
                     SimpleFileOperation::Write(data) => {
-                        if !data.is_empty() {
-                            let value = str::from_utf8(data)
-                                .ok()
-                                .and_then(|it| it.parse::<i32>().ok())
-                                .ok_or(VfsError::InvalidInput)?;
-                            task.as_thread().set_oom_score_adj(value);
+                        let s = str::from_utf8(data)
+                            .map_err(|_| VfsError::InvalidInput)?
+                            .trim();
+                        if s.is_empty() {
+                            return Ok(None);
                         }
+                        let value = s.parse::<i32>().map_err(|_| VfsError::InvalidInput)?;
+                        task.as_thread().set_oom_score_adj(value);
                         Ok(None)
                     }
                 }),
@@ -280,17 +281,21 @@ impl SimpleDirOps for ThreadDir {
                         Ok(Some(bytes))
                     }
                     SimpleFileOperation::Write(data) => {
-                        if !data.is_empty() {
-                            let mut input = [0; 16];
-                            let copy_len = data.len().min(15);
-                            input[..copy_len].copy_from_slice(&data[..copy_len]);
-                            task.set_name(
-                                CStr::from_bytes_until_nul(&input)
-                                    .map_err(|_| VfsError::InvalidInput)?
-                                    .to_str()
-                                    .map_err(|_| VfsError::InvalidInput)?,
-                            );
+                        let s = str::from_utf8(data)
+                            .map_err(|_| VfsError::InvalidInput)?
+                            .trim();
+                        if s.is_empty() {
+                            return Ok(None);
                         }
+                        let mut input = [0; 16];
+                        let copy_len = s.as_bytes().len().min(15);
+                        input[..copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
+                        task.set_name(
+                            CStr::from_bytes_until_nul(&input)
+                                .map_err(|_| VfsError::InvalidInput)?
+                                .to_str()
+                                .map_err(|_| VfsError::InvalidInput)?,
+                        );
                         Ok(None)
                     }
                 }),

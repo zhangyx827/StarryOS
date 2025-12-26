@@ -9,6 +9,7 @@ use starry_vm::{VmMutPtr, VmPtr, vm_write_slice};
 use crate::mm::vm_load_string;
 
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
+const PR_THP_DISABLE_EXCEPT_ADVISED: usize = 2;
 
 fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<()> {
     // FIXME: AnyBitPattern
@@ -105,6 +106,25 @@ pub fn sys_prctl(
         | PR_SET_MM_END_DATA
         | PR_SET_MM_START_BRK
         | PR_SET_MM_START_STACK => {}
+        PR_SET_THP_DISABLE => {
+            let mode = match (arg2, arg3, arg4, arg5) {
+                (0, 0, 0, 0) => 0,                             // re-enable
+                (1, 0, 0, 0) => 1,                             // fully disable
+                (1, PR_THP_DISABLE_EXCEPT_ADVISED, 0, 0) => 3, // disable except advised
+                _ => return Err(AxError::InvalidInput),
+            };
+            let curr = current();
+            let aspace = curr.as_thread().proc_data.aspace.lock();
+            aspace.set_thp_mode(mode as u32);
+        }
+        PR_GET_THP_DISABLE => {
+            match (arg2, arg3, arg4, arg5) {
+                (0, 0, 0, 0) => {}
+                _ => return Err(AxError::InvalidInput),
+            }
+            let mode = current().as_thread().proc_data.aspace.lock().thp_mode();
+            return Ok(mode as isize);
+        }
         _ => {
             warn!("sys_prctl: unsupported option {option}");
             return Err(AxError::InvalidInput);
